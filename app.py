@@ -54,6 +54,10 @@ FRONTEND_URL  = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+@app.route("/")
+def root():
+    return jsonify({"status": "ok", "message": "Insighta API running"})
+
 @app.before_request
 def _start_timer():
     g.start_time = time.time()
