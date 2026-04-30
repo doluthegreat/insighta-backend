@@ -93,57 +93,60 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS profiles (
-            id                  UUID PRIMARY KEY,
-            name                VARCHAR UNIQUE NOT NULL,
-            gender              VARCHAR,
-            gender_probability  FLOAT,
-            age                 INT,
-            age_group           VARCHAR,
-            country_id          VARCHAR(2),
-            country_name        VARCHAR,
-            country_probability FLOAT,
-            created_at          TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    c.execute("CREATE INDEX IF NOT EXISTS idx_filters ON profiles(gender, age_group, country_id)")
+    c.execute("SELECT pg_advisory_lock(987654321);")
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id            UUID PRIMARY KEY,
-            github_id     VARCHAR UNIQUE NOT NULL,
-            username      VARCHAR,
-            email         VARCHAR,
-            avatar_url    VARCHAR,
-            role          VARCHAR DEFAULT 'analyst' CHECK (role IN ('admin', 'analyst')),
-            is_active     BOOLEAN DEFAULT TRUE,
-            last_login_at TIMESTAMPTZ,
-            created_at    TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS profiles (
+                id                  UUID PRIMARY KEY,
+                name                VARCHAR UNIQUE NOT NULL,
+                gender              VARCHAR,
+                gender_probability  FLOAT,
+                age                 INT,
+                age_group           VARCHAR,
+                country_id          VARCHAR(2),
+                country_name        VARCHAR,
+                country_probability FLOAT,
+                created_at          TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS refresh_tokens (
-            id          UUID PRIMARY KEY,
-            user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
-            token_hash  VARCHAR UNIQUE NOT NULL,
-            expires_at  TIMESTAMPTZ NOT NULL,
-            is_revoked  BOOLEAN DEFAULT FALSE,
-            created_at  TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_filters
+            ON profiles(gender, age_group, country_id)
+        """)
 
-    conn.commit()
-    conn.close()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            UUID PRIMARY KEY,
+                github_id     VARCHAR UNIQUE NOT NULL,
+                username      VARCHAR,
+                email         VARCHAR,
+                avatar_url    VARCHAR,
+                role          VARCHAR DEFAULT 'analyst'
+                    CHECK (role IN ('admin', 'analyst')),
+                is_active     BOOLEAN DEFAULT TRUE,
+                last_login_at TIMESTAMPTZ,
+                created_at    TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id          UUID PRIMARY KEY,
+                user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+                token_hash  VARCHAR UNIQUE NOT NULL,
+                expires_at  TIMESTAMPTZ NOT NULL,
+                is_revoked  BOOLEAN DEFAULT FALSE,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
 
-try:
-    init_db()
-    print("✅ DB ready")
-except Exception as e:
-    traceback.print_exc()
-    print(f"❌ DB init failed: {e}")
+        conn.commit()
+
+    finally:
+        c.execute("SELECT pg_advisory_unlock(987654321);")
+        conn.close()
 
 
 
