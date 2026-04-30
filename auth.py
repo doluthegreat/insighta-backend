@@ -15,11 +15,9 @@ GITHUB_CLIENT_SECRET  = os.environ.get("GITHUB_CLIENT_SECRET", "")
 ACCESS_TOKEN_EXPIRY   = 3 * 60   # 3 minutes
 REFRESH_TOKEN_EXPIRY  = 5 * 60   # 5 minutes
 
-# ─── In-memory short-lived stores ────────────────────────────────────────────
-# {backend_state: {type, code_challenge, cli_redirect, cli_state, expires_at}}
 oauth_states: dict = {}
 
-# {gh_code: {code_challenge, expires_at}}
+
 pending_exchanges: dict = {}
 
 
@@ -32,13 +30,11 @@ def _cleanup():
             del store[k]
 
 
-# ─── PKCE helpers ─────────────────────────────────────────────────────────────
 def compute_code_challenge(code_verifier: str) -> str:
     digest = hashlib.sha256(code_verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
-# ─── GitHub helpers ───────────────────────────────────────────────────────────
 def build_github_auth_url(backend_state: str, callback_url: str) -> str:
     params = (
         f"client_id={GITHUB_CLIENT_ID}"
@@ -47,6 +43,8 @@ def build_github_auth_url(backend_state: str, callback_url: str) -> str:
         f"&state={backend_state}"
     )
     return f"https://github.com/login/oauth/authorize?{params}"
+
+
 
 
 def exchange_github_code(code: str, redirect_uri: str) -> dict:
@@ -96,7 +94,6 @@ def get_github_primary_email(gh_access_token: str) -> str | None:
     return None
 
 
-# ─── JWT ──────────────────────────────────────────────────────────────────────
 def create_access_token(user_id: str, role: str) -> str:
     payload = {
         "sub":  user_id,
@@ -111,8 +108,6 @@ def create_access_token(user_id: str, role: str) -> str:
 def decode_access_token(token: str) -> dict:
     return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
 
-
-# ─── Refresh tokens ───────────────────────────────────────────────────────────
 def new_refresh_token() -> str:
     return secrets.token_urlsafe(32)
 

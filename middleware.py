@@ -32,7 +32,6 @@ def require_auth(f):
 
         g.user = {"id": payload["sub"], "role": payload["role"]}
 
-        # Check is_active via DB (imported lazily to avoid circular import)
         from app import get_conn
         try:
             conn = get_conn()
@@ -74,7 +73,7 @@ def require_csrf(f):
     """Decorator: validates CSRF token for web clients using cookies."""
     @wraps(f)
     def wrapper(*args, **kwargs):
-        # Only enforce for requests that arrive with cookie-based auth
+        
         if request.cookies.get("access_token"):
             client_csrf  = request.headers.get("X-CSRF-Token", "")
             cookie_csrf  = request.cookies.get("csrf_token", "")

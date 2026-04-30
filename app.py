@@ -1,3 +1,4 @@
+oauth_states = {}
 import os
 import re
 import csv
@@ -223,11 +224,8 @@ def auth_github():
 
 
 @app.route("/auth/github/callback")
-@limiter.limit("10 per minute")
 def auth_github_callback():
     """GitHub redirects here after user authenticates."""
-    _cleanup()
-
     code          = request.args.get("code")
     backend_state = request.args.get("state")
 
@@ -238,32 +236,22 @@ def auth_github_callback():
     if not state_data:
         return jsonify({"status": "error", "message": "Invalid or expired state"}), 400
 
-    flow_type        = state_data["type"]
     backend_callback = f"{BACKEND_URL}/auth/github/callback"
-
 
     try:
         token_data = exchange_github_code(code, backend_callback)
-    except Exception:
-        return jsonify({"status": "error", "message": "GitHub token exchange failed"}), 502
-
-    gh_access = token_data.get("access_token")
-    if not gh_access:
-        return jsonify({"status": "error", "message": "GitHub token exchange failed"}), 502
-
-    try:
+        gh_access = token_data.get("access_token")
         gh_user = get_github_user(gh_access)
         email   = get_github_primary_email(gh_access)
-    except Exception:
-        return jsonify({"status": "error", "message": "Failed to fetch GitHub user"}), 502
-
-    github_id  = str(gh_user.get("id"))
-    username   = gh_user.get("login")
-    avatar_url = gh_user.get("avatar_url")
+        
+        github_id = str(gh_user.get("id"))
+        username  = gh_user.get("login")
+        avatar    = gh_user.get("avatar_url")
+    except Exception as e:
+        return jsonify({"status": "error", "message": "GitHub communication failed"}), 502
 
     conn = get_conn()
-    c    = conn.cursor()
-
+    c = conn.cursor()
     c.execute("SELECT id, role, is_active FROM users WHERE github_id = %s", (github_id,))
     row = c.fetchone()
 
@@ -271,47 +259,28 @@ def auth_github_callback():
         user_id, role, is_active = str(row[0]), row[1], row[2]
         c.execute(
             "UPDATE users SET username=%s,email=%s,avatar_url=%s,last_login_at=NOW() WHERE id=%s",
-            (username, email, avatar_url, user_id),
+            (username, email, avatar, user_id),
         )
     else:
-        user_id  = str(uuid6.uuid7())
-        role     = "analyst"
-        is_active = True
+        user_id, role, is_active = str(uuid6.uuid7()), "analyst", True
         c.execute(
             """INSERT INTO users (id,github_id,username,email,avatar_url,role,is_active,last_login_at,created_at)
                VALUES (%s,%s,%s,%s,%s,%s,TRUE,NOW(),NOW())""",
-            (user_id, github_id, username, email, avatar_url, role),
+            (user_id, github_id, username, email, avatar, role),
         )
-
+    
     conn.commit()
 
     if not is_active:
         conn.close()
-        return jsonify({"status": "error", "message": "Account is inactive"}), 403
+        return jsonify({"status": "error", "message": "Account inactive"}), 403
 
-    if flow_type == "cli":
-        
-        pending_exchanges[code] = {
-            "code_challenge": state_data["code_challenge"],
-            "user_id":        user_id,
-            "role":           role,
-            "expires_at":     time.time() + 300,
-        }
-        conn.close()
-        cli_redirect = state_data.get("cli_redirect", "")
-        cli_state    = state_data.get("cli_state", "")
-        return redirect(f"{cli_redirect}?code={code}&state={cli_state}")
-
-
+   
     access, refresh = _issue_tokens(user_id, role, conn)
     conn.close()
 
-    csrf = secrets.token_urlsafe(16)
-    resp = make_response(redirect(f"{FRONTEND_URL}/dashboard"))
-    _set_web_cookies(resp, access, refresh, csrf)
-    return resp
 
-
+    return redirect(f"{FRONTEND_URL}/index.html?token={access}")
 @app.route("/auth/token", methods=["POST"])
 @limiter.limit("10 per minute")
 def auth_token():
