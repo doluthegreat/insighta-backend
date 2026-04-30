@@ -92,7 +92,8 @@ def compute_code_challenge(verifier):
     return base64.urlsafe_b64encode(sha256_hash).decode('utf-8').replace('=', '')
 
 def process_github_login(code):
-    access_token = exchange_github_code(code)
+    backend_callback = f"{BACKEND_URL}/auth/github/callback"
+    access_token = exchange_github_code(code, backend_callback)
     user = get_github_user(access_token)
     email = get_github_primary_email(access_token)
 
