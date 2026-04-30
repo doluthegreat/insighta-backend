@@ -145,7 +145,12 @@ def _issue_tokens(user_id: str, role: str, conn=None):
 def auth_github():
     _cleanup()
 
-    backend_state = secrets.token_urlsafe(16)
+    backend_state = create_oauth_state({
+    "type": "cli" if request.args.get("code_challenge") else "web",
+    "code_challenge": request.args.get("code_challenge"),
+    "cli_state": request.args.get("state"),
+    "cli_redirect": request.args.get("redirect_uri"),
+    })
     backend_callback = f"{BACKEND_URL}/auth/github/callback"
 
     code_challenge = request.args.get("code_challenge")
@@ -176,7 +181,7 @@ def github_callback():
     if not state or state not in oauth_states:
         return jsonify({"status": "error", "message": "Invalid state"}), 400
 
-    flow = oauth_states.pop(state)
+    flow = decode_oauth_state(state)
 
     if flow["expires_at"] < time.time():
         return jsonify({"status": "error", "message": "State expired"}), 400
