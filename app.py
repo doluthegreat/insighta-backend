@@ -42,7 +42,6 @@ from utils import (
     age_to_group,
 )
 
-# ─── App setup ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
@@ -52,7 +51,6 @@ DATABASE_URL  = os.environ.get("DATABASE_URL", "").replace("postgres://", "postg
 BACKEND_URL   = os.environ.get("BACKEND_URL", "http://localhost:5000")
 FRONTEND_URL  = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -69,7 +67,6 @@ def _log_request(response):
     return response
 
 
-# ─── Rate limiting ────────────────────────────────────────────────────────────
 def _rate_limit_key():
     if hasattr(g, "user") and g.user:
         return f"user:{g.user['id']}"
@@ -88,8 +85,6 @@ limiter = Limiter(
 def _rate_limit_error(e):
     return jsonify({"status": "error", "message": "Too many requests"}), 429
 
-
-# ─── DB ───────────────────────────────────────────────────────────────────────
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
@@ -151,7 +146,7 @@ except Exception as e:
     print(f"❌ DB init failed: {e}")
 
 
-# ─── Token helpers ────────────────────────────────────────────────────────────
+
 def _issue_tokens(user_id: str, role: str, conn=None):
     """Create access + refresh tokens; persist refresh token in DB."""
     close_conn = False
@@ -182,12 +177,12 @@ def _set_web_cookies(response, access: str, refresh: str, csrf: str):
     kw = dict(httponly=True, samesite="Lax", secure=secure)
     response.set_cookie("access_token",  access,  max_age=3 * 60,    **kw)
     response.set_cookie("refresh_token", refresh, max_age=5 * 60,    **kw)
-    # CSRF token is NOT http-only so JS can read it
+    
     response.set_cookie("csrf_token", csrf, max_age=5 * 60, samesite="Lax", secure=secure)
     return response
 
 
-# ─── Auth: GitHub OAuth ───────────────────────────────────────────────────────
+
 @app.route("/auth/github")
 @limiter.limit("10 per minute")
 def auth_github():
@@ -206,7 +201,7 @@ def auth_github():
     cli_redirect   = request.args.get("redirect_uri")
 
     if code_challenge:
-        # CLI flow
+        
         oauth_states[backend_state] = {
             "type":           "cli",
             "code_challenge": code_challenge,
@@ -215,7 +210,7 @@ def auth_github():
             "expires_at":     time.time() + 300,
         }
     else:
-        # Web flow
+        
         oauth_states[backend_state] = {
             "type":       "web",
             "expires_at": time.time() + 300,
@@ -243,7 +238,7 @@ def auth_github_callback():
     flow_type        = state_data["type"]
     backend_callback = f"{BACKEND_URL}/auth/github/callback"
 
-    # Exchange code with GitHub (backend holds client_secret)
+
     try:
         token_data = exchange_github_code(code, backend_callback)
     except Exception:
@@ -263,7 +258,6 @@ def auth_github_callback():
     username   = gh_user.get("login")
     avatar_url = gh_user.get("avatar_url")
 
-    # Upsert user
     conn = get_conn()
     c    = conn.cursor()
 
@@ -293,7 +287,7 @@ def auth_github_callback():
         return jsonify({"status": "error", "message": "Account is inactive"}), 403
 
     if flow_type == "cli":
-        # Store the GitHub code + code_challenge for the CLI to exchange
+        
         pending_exchanges[code] = {
             "code_challenge": state_data["code_challenge"],
             "user_id":        user_id,
@@ -305,7 +299,7 @@ def auth_github_callback():
         cli_state    = state_data.get("cli_state", "")
         return redirect(f"{cli_redirect}?code={code}&state={cli_state}")
 
-    # Web flow: issue tokens, set cookies, redirect to frontend
+
     access, refresh = _issue_tokens(user_id, role, conn)
     conn.close()
 
@@ -332,7 +326,7 @@ def auth_token():
     if not exchange:
         return jsonify({"status": "error", "message": "Invalid or expired code"}), 400
 
-    # Verify PKCE
+    
     expected_challenge = exchange["code_challenge"]
     actual_challenge   = compute_code_challenge(code_verifier)
     if actual_challenge != expected_challenge:
@@ -364,7 +358,7 @@ def auth_token():
 def auth_refresh():
     """Rotate refresh token; issue new access + refresh pair."""
     data          = request.get_json() or {}
-    # Accept token from JSON body (CLI) or cookie (web)
+    
     refresh_token = data.get("refresh_token") or request.cookies.get("refresh_token")
 
     if not refresh_token:
@@ -391,7 +385,7 @@ def auth_refresh():
         conn.close()
         return jsonify({"status": "error", "message": "Refresh token expired or revoked"}), 401
 
-    # Revoke old token immediately
+
     c.execute("UPDATE refresh_tokens SET is_revoked = TRUE WHERE id = %s", (str(rt_id),))
 
     c.execute("SELECT role, is_active FROM users WHERE id = %s", (str(user_id),))
@@ -411,7 +405,6 @@ def auth_refresh():
         "refresh_token": new_refresh,
     }
 
-    # If the original request used cookies, update cookies
     if request.cookies.get("refresh_token"):
         csrf = secrets.token_urlsafe(16)
         resp = make_response(jsonify(payload))
@@ -478,7 +471,6 @@ def auth_me():
     }), 200
 
 
-# ─── Health ───────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     try:
@@ -492,7 +484,6 @@ def health():
         return jsonify({"status": "error", "detail": str(e)}), 500
 
 
-# ─── Profile query helper ─────────────────────────────────────────────────────
 def _build_pagination_links(page, limit, total, base_path, extra_params):
     total_pages = (total + limit - 1) // limit if limit else 1
     qs          = "".join(f"&{k}={v}" for k, v in extra_params.items() if v is not None)
@@ -585,7 +576,7 @@ def _row_to_dict(r):
     }
 
 
-# ─── Natural language parser (Stage 2 preserved) ─────────────────────────────
+
 def parse_nl(q):
     s = q.lower().strip()
     f = {}
@@ -622,7 +613,6 @@ def parse_nl(q):
     return f if f else None
 
 
-# ─── Profile API endpoints ────────────────────────────────────────────────────
 @app.route("/api/profiles", methods=["GET"])
 @require_auth
 @require_version
@@ -739,7 +729,6 @@ def export_profiles():
         if o in ("asc", "desc"):
             filters["order"] = o
 
-    # Build WHERE clause
     where, params = [], []
     for key, col in [("gender", "gender"), ("age_group", "age_group"), ("country_id", "country_id")]:
         if key in filters:
@@ -881,7 +870,6 @@ def get_profile(profile_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ─── Error handlers ───────────────────────────────────────────────────────────
 @app.errorhandler(404)
 def _not_found(_):
     return jsonify({"status": "error", "message": "Not found"}), 404
@@ -894,5 +882,5 @@ def _server_error(e):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
