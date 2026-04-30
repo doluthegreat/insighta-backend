@@ -1,4 +1,7 @@
+import hashlib
+import base64
 oauth_states = {}
+
 import os
 import re
 import csv
@@ -42,7 +45,11 @@ from utils import (
     VALID_SORT_COLS,
     age_to_group,
 )
+pending_exchanges = {}
 
+def compute_code_challenge(verifier):
+    sha256_hash = hashlib.sha256(verifier.encode('utf-8')).digest()
+    return base64.urlsafe_b64encode(sha256_hash).decode('utf-8').replace('=', '')
 app = Flask(__name__)
 
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
@@ -93,13 +100,11 @@ def get_conn():
 def init_db():
     conn = get_conn()
     c = conn.cursor()
-
     c.execute("SELECT pg_advisory_lock(987654321);")
-
     try:
         c.execute("""
             CREATE TABLE IF NOT EXISTS profiles (
-                id                  UUID PRIMARY KEY,
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name                VARCHAR UNIQUE NOT NULL,
                 gender              VARCHAR,
                 gender_probability  FLOAT,
@@ -111,15 +116,13 @@ def init_db():
                 created_at          TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-
         c.execute("""
             CREATE INDEX IF NOT EXISTS idx_filters
             ON profiles(gender, age_group, country_id)
         """)
-
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id            UUID PRIMARY KEY,
+                id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 github_id     VARCHAR UNIQUE NOT NULL,
                 username      VARCHAR,
                 email         VARCHAR,
@@ -131,10 +134,9 @@ def init_db():
                 created_at    TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-
         c.execute("""
             CREATE TABLE IF NOT EXISTS refresh_tokens (
-                id          UUID PRIMARY KEY,
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
                 token_hash  VARCHAR UNIQUE NOT NULL,
                 expires_at  TIMESTAMPTZ NOT NULL,
@@ -142,12 +144,16 @@ def init_db():
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-
         conn.commit()
-
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        c.execute("SELECT pg_advisory_unlock(987654321);")
-        conn.close()
+        try:
+            c.execute("SELECT pg_advisory_unlock(987654321);")
+            conn.commit()
+        finally:
+            conn.close()
 
 
 
@@ -224,71 +230,26 @@ def auth_github():
 
 
 @app.route("/auth/github/callback")
-def auth_github_callback():
-    """GitHub redirects here after user authenticates."""
-    code          = request.args.get("code")
-    backend_state = request.args.get("state")
-
-    if not code or not backend_state:
-        return jsonify({"status": "error", "message": "Missing code or state"}), 400
-
-    state_data = oauth_states.pop(backend_state, None)
-    if not state_data:
-        return jsonify({"status": "error", "message": "Invalid or expired state"}), 400
-
-    backend_callback = f"{BACKEND_URL}/auth/github/callback"
-
-    try:
-        token_data = exchange_github_code(code, backend_callback)
-        gh_access = token_data.get("access_token")
-        gh_user = get_github_user(gh_access)
-        email   = get_github_primary_email(gh_access)
-        
-        github_id = str(gh_user.get("id"))
-        username  = gh_user.get("login")
-        avatar    = gh_user.get("avatar_url")
-    except Exception as e:
-        return jsonify({"status": "error", "message": "GitHub communication failed"}), 502
-
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id, role, is_active FROM users WHERE github_id = %s", (github_id,))
-    row = c.fetchone()
-
-    if row:
-        user_id, role, is_active = str(row[0]), row[1], row[2]
-        c.execute(
-            "UPDATE users SET username=%s,email=%s,avatar_url=%s,last_login_at=NOW() WHERE id=%s",
-            (username, email, avatar, user_id),
-        )
-    else:
-        user_id, role, is_active = str(uuid6.uuid7()), "analyst", True
-        c.execute(
-            """INSERT INTO users (id,github_id,username,email,avatar_url,role,is_active,last_login_at,created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,TRUE,NOW(),NOW())""",
-            (user_id, github_id, username, email, avatar, role),
-        )
+def github_callback():
+    state = request.args.get('state')
+    github_code = request.args.get('code')
     
-    conn.commit()
+    user_id, role = process_github_login(github_code)
 
-    if not is_active:
-        conn.close()
-        return jsonify({"status": "error", "message": "Account inactive"}), 403
+    if state and state in pending_exchanges:
+        pending_exchanges[state].update({
+            "user_id": user_id,
+            "role": role
+        })
+        return "<h1>Authenticated! Return to your terminal.</h1>"
 
-   
-    access, refresh = _issue_tokens(user_id, role, conn)
-    conn.close()
-
-
-    return redirect(f"{FRONTEND_URL}/index.html?token={access}")
+    access, refresh = _issue_tokens(user_id, role)
+    return redirect(f"https://insighta-web-production-ad10.up.railway.app//index.html?token={access}")
 @app.route("/auth/token", methods=["POST"])
 @limiter.limit("10 per minute")
 def auth_token():
-    """CLI: exchange GitHub code + code_verifier for tokens (PKCE verification)."""
-    _cleanup()
-
-    data          = request.get_json() or {}
-    code          = data.get("code")
+    data = request.get_json() or {}
+    code = data.get("code")
     code_verifier = data.get("code_verifier")
 
     if not code or not code_verifier:
@@ -298,30 +259,31 @@ def auth_token():
     if not exchange:
         return jsonify({"status": "error", "message": "Invalid or expired code"}), 400
 
-    
     expected_challenge = exchange["code_challenge"]
-    actual_challenge   = compute_code_challenge(code_verifier)
+    actual_challenge = compute_code_challenge(code_verifier)
+    
     if actual_challenge != expected_challenge:
         return jsonify({"status": "error", "message": "PKCE verification failed"}), 400
 
     user_id = exchange["user_id"]
-    role    = exchange["role"]
+    role = exchange["role"]
 
     access, refresh = _issue_tokens(user_id, role)
 
+    from database import get_conn
     conn = get_conn()
-    c    = conn.cursor()
+    c = conn.cursor()
     c.execute("SELECT username FROM users WHERE id = %s", (user_id,))
-    row      = c.fetchone()
-    username = row[0] if row else ""
+    row = c.fetchone()
+    username = row[0] if row else "Unknown"
     conn.close()
 
     return jsonify({
-        "status":        "success",
-        "access_token":  access,
+        "status": "success",
+        "access_token": access,
         "refresh_token": refresh,
-        "username":      username,
-        "role":          role,
+        "username": username,
+        "role": role,
     }), 200
 
 
